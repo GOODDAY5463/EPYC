@@ -1,0 +1,63 @@
+name: macOS
+
+on: workflow_dispatch
+
+jobs:
+  rdp:
+    runs-on: macos-latest
+    steps:
+      - name: Setup RDP and Tunnel
+        shell: bash
+        run: |
+          # Включаем Remote Desktop
+          sudo systemsetup -setremotelogin on
+          
+          # Получаем текущего пользователя (обычно 'runner' в GitHub Actions)
+          CURRENT_USER=$(whoami)
+          echo "Текущий пользователь: $CURRENT_USER"
+          
+          # Генерируем пароль для текущего пользователя
+          ADMIN_PASSWORD=$(openssl rand -base64 15 | tr -d '\n')
+          
+          # Устанавливаем пароль для текущего пользователя (macOS способ)
+          sudo dscl . -passwd /Users/$CURRENT_USER "$ADMIN_PASSWORD"
+          
+          # Убедимся, что пользователь имеет права для RDP
+          sudo dseditgroup -o edit -a "$CURRENT_USER" -t user com.apple.access_ssh
+          sudo dseditgroup -o edit -a "$CURRENT_USER" -t user com.apple.access_remote-desktop
+          
+          # Скачиваем и запускаем bore (замените на актуальную ссылку для macOS)
+          curl -L "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-apple-darwin.tar.gz" -o bore.tar.gz
+          tar -xzf bore.tar.gz
+          chmod +x bore
+          
+          # Запускаем tunnel в фоне
+          ./bore local 5900 --to bore.pub > tunnel.log 2>&1 &
+          BORE_PID=$!
+          
+          # Даем время на запуск tunnel
+          sleep 10
+          
+          # Получаем tunnel URL из логов
+          TUNNEL_URL=$(grep "listening at" tunnel.log | grep -o "bore.pub:[0-9]*" | head -1)
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "Ошибка: Не удалось получить tunnel URL"
+            kill $BORE_PID
+            exit 1
+          fi
+          
+          echo "============== ДАННЫЕ ДЛЯ ПОДКЛЮЧЕНИЯ ==============="
+          echo "Адрес:      $TUNNEL_URL"
+          echo "Юзер:       $CURRENT_USER"
+          echo "Пароль:     $ADMIN_PASSWORD"
+          echo "====================================================="
+          
+          # Выводим в формате для GitHub Actions
+          echo "::notice title=RDP Access::Host: $TUNNEL_URL | User: $CURRENT_USER | Pass: $ADMIN_PASSWORD"
+          
+          # Ждем 6 часов (21600 секунд)
+          sleep 21600
+          
+          # Завершаем tunnel после ожидания
+          kill $BORE_PID
