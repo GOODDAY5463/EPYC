@@ -1,0 +1,124 @@
+# This is a basic workflow to help you get started with Actions
+
+
+name: macOS RDP 5
+
+on: workflow_dispatch
+
+jobs:
+  rdp:
+    runs-on: macos-latest
+    steps:
+      - name: Setup macOS VNC with bore
+        shell: bash
+        run: |
+          # Отключаем spotlight indexing для экономии ресурсов
+          sudo mdutil -i off -a
+          
+          # Создаем нового пользователя
+          sudo dscl . -create /Users/vncuser
+          sudo dscl . -create /Users/vncuser UserShell /bin/bash
+          sudo dscl . -create /Users/vncuser RealName "VNC User"
+          sudo dscl . -create /Users/vncuser UniqueID 1001
+          sudo dscl . -create /Users/vncuser PrimaryGroupID 80
+          sudo dscl . -create /Users/vncuser NFSHomeDirectory /Users/vncuser
+          
+          # Генерируем пароли
+          USER_PASSWORD=$(openssl rand -base64 12 | tr -d '\n=+/')
+          VNC_PASSWORD=$(openssl rand -base64 12 | tr -d '\n=+/')
+          
+          # Устанавливаем пароль для пользователя
+          sudo dscl . -passwd /Users/vncuser "$USER_PASSWORD"
+          sudo createhomedir -c -u vncuser > /dev/null
+          
+          # Добавляем пользователя в группу администраторов
+          sudo dseditgroup -o edit -a vncuser -t user admin
+          sudo dseditgroup -o edit -a vncuser -t user wheel
+          
+          # Включаем удаленное управление через System Preferences
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -access -on \
+            -privs -all \
+            -allowAccessFor -allUsers \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setreqperm -reqperm no \
+            -restart -agent
+          
+          # Настраиваем Screen Sharing (VNC) через launchctl
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+          
+          # Устанавливаем VNC пароль
+          echo "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt
+          
+          # Включаем разрешения для записи экрана (требуется для современных версий macOS)
+          sudo sqlite3 /Library/Application\ Support/com.apple.TCC/TCC.db \
+            "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','com.apple.screensharing.agent',0,1,1,NULL,NULL,NULL,'UNUSED',NULL,0,1641901403);"
+          
+          sudo sqlite3 /Library/Application\ Support/com.apple.TCC/TCC.db \
+            "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',0,1,1,NULL,NULL,NULL,'UNUSED',NULL,0,1641901403);"
+          
+          # Включаем Screen Sharing через networksetup
+          sudo /usr/libexec/PlistBuddy -c "Set :Disabled false" /var/db/launchd.db/com.apple.launchd/overrides.plist
+          
+          # Перезапускаем службы
+          sudo launchctl kickstart -k system/com.apple.screensharing
+          sudo launchctl enable system/com.apple.screensharing
+          
+          # Активируем Remote Management
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure -allowAccessFor -allUsers \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -restart -agent -console
+          
+          # Скачиваем bore (замените ссылку на актуальную версию для macOS)
+          curl -L "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-apple-darwin.tar.gz" -o bore.tar.gz
+          tar -xzf bore.tar.gz
+          chmod +x bore
+          
+          # Запускаем tunnel в фоне
+          ./bore local 5900 --to bore.pub > tunnel.log 2>&1 &
+          BORE_PID=$!
+          
+          # Даем время на запуск tunnel
+          sleep 15
+          
+          # Получаем tunnel URL из логов
+          TUNNEL_URL=$(grep "listening at" tunnel.log | grep -o "bore.pub:[0-9]*" | head -1)
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "Ошибка: Не удалось получить tunnel URL"
+            kill $BORE_PID
+            exit 1
+          fi
+          
+          # Проверяем, работает ли VNC
+          VNC_STATUS=$(sudo launchctl list | grep -i screensharing)
+          if [ -n "$VNC_STATUS" ]; then
+            echo "✓ VNC служба запущена"
+          else
+            echo "✗ VNC служба не запущена"
+          fi
+          
+          echo "============== ДАННЫЕ ДЛЯ ПОДКЛЮЧЕНИЯ ==============="
+          echo "Адрес VNC:  $TUNNEL_URL"
+          echo "Порт:       5900 (стандартный для VNC)"
+          echo "Юзер:       vncuser"
+          echo "Пароль (VNC): $VNC_PASSWORD"
+          echo "Пароль (пользователь): $USER_PASSWORD"
+          echo ""
+          echo "Инструкция по подключению:"
+          echo "1. Используйте VNC клиент (RealVNC, TigerVNC и др.)"
+          echo "2. Подключитесь к адресу: $TUNNEL_URL"
+          echo "3. Порт: 5900"
+          echo "4. Используйте пароль VNC при подключении"
+          echo "====================================================="
+          
+          # Выводим в формате для GitHub Actions
+          echo "::notice title=VNC Access::Host: $TUNNEL_URL | User: vncuser | VNC Pass: $VNC_PASSWORD | User Pass: $USER_PASSWORD"
+          
+          # Ждем 6 часов (21600 секунд)
+          sleep 21600
+          
+          # Завершаем tunnel после ожидания
+          kill $BORE_PID
