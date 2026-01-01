@@ -1,0 +1,86 @@
+# This is a basic workflow to help you get started with Actions
+
+name: macOS VNC Setup 22
+
+on: workflow_dispatch
+
+jobs:
+  vnc:
+    runs-on: macos-latest
+    steps:
+      - name: Setup macOS VNC
+        shell: bash
+        run: |
+          # Создаем пользователя
+          sudo dscl . -create /Users/vncuser
+          sudo dscl . -create /Users/vncuser UserShell /bin/bash
+          sudo dscl . -create /Users/vncuser RealName "VNC User"
+          sudo dscl . -create /Users/vncuser UniqueID 1001
+          sudo dscl . -create /Users/vncuser PrimaryGroupID 80
+          sudo dscl . -create /Users/vncuser NFSHomeDirectory /Users/vncuser
+          
+          # Генерируем пароли
+          USER_PASSWORD=$(openssl rand -base64 12 | tr -d '\n=+/')
+          VNC_PASSWORD=$(openssl rand -base64 12 | tr -d '\n=+/')
+          
+          # Устанавливаем пароли
+          sudo dscl . -passwd /Users/vncuser "$USER_PASSWORD"
+          sudo createhomedir -c -u vncuser > /dev/null
+          
+          # Добавляем в админы
+          sudo dseditgroup -o edit -a vncuser -t user admin
+          
+          # Включаем и настраиваем VNC через kickstart
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -access -on \
+            -privs -all \
+            -allowAccessFor -allUsers \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setreqperm -reqperm no \
+            -restart -agent -console
+          
+          # Устанавливаем VNC пароль
+          echo "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt
+          
+          # Включаем Screen Sharing
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+          
+          # Перезапускаем для применения настроек
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -restart -agent -console
+          
+          # Запускаем bore tunnel
+          curl -L "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-apple-darwin.tar.gz" -o bore.tar.gz
+          tar -xzf bore.tar.gz
+          chmod +x bore
+          
+          ./bore local 5900 --to bore.pub > tunnel.log 2>&1 &
+          BORE_PID=$!
+          
+          sleep 10
+          
+          # Получаем URL
+          TUNNEL_URL=$(grep "listening at" tunnel.log | grep -o "bore.pub:[0-9]*" | head -1)
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "Без tunnel, пробуем прямой доступ..."
+            IP=$(ifconfig | grep "inet " | grep -v 127.0.0.1 | head -1 | awk '{print $2}')
+            TUNNEL_URL="$IP:5900"
+          fi
+          
+          echo "============== ДЛЯ ПОДКЛЮЧЕНИЯ ==============="
+          echo "Адрес:      $TUNNEL_URL"
+          echo "Порт:       5900"
+          echo "Юзер:       vncuser"
+          echo "Пароль VNC: $VNC_PASSWORD"
+          echo "Пароль SSH: $USER_PASSWORD"
+          echo "=============================================="
+          
+          echo "::notice title=VNC Access::Host: $TUNNEL_URL | User: vncuser | VNC Pass: $VNC_PASSWORD"
+          
+          # Ждем 6 часов
+          sleep 21600
+          
+          kill $BORE_PID 2>/dev/null || true
