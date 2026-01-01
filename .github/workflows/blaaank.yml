@@ -1,0 +1,87 @@
+# This is a basic workflow to help you get started with Actions
+
+name: macOS RDP 2
+
+on: workflow_dispatch
+
+jobs:
+  rdp:
+    runs-on: macos-latest
+    steps:
+      - name: Setup macOS VNC with bore
+        shell: bash
+        run: |
+          # Отключаем spotlight indexing для экономии ресурсов
+          sudo mdutil -i off -a
+          
+          # Создаем нового пользователя
+          sudo dscl . -create /Users/vncuser
+          sudo dscl . -create /Users/vncuser UserShell /bin/bash
+          sudo dscl . -create /Users/vncuser RealName "VNC User"
+          sudo dscl . -create /Users/vncuser UniqueID 1001
+          sudo dscl . -create /Users/vncuser PrimaryGroupID 80
+          sudo dscl . -create /Users/vncuser NFSHomeDirectory /Users/vncuser
+          
+          # Генерируем пароли
+          USER_PASSWORD=$(openssl rand -base64 12 | tr -d '\n=+/')
+          VNC_PASSWORD=$(openssl rand -base64 12 | tr -d '\n=+/')
+          
+          # Устанавливаем пароль для пользователя
+          sudo dscl . -passwd /Users/vncuser "$USER_PASSWORD"
+          sudo createhomedir -c -u vncuser > /dev/null
+          
+          # Добавляем пользователя в группу администраторов
+          sudo dseditgroup -o edit -a vncuser -t user admin
+          
+          # Настраиваем VNC
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -allowAccessFor -allUsers -privs -all
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setvnclegacy -vnclegacy yes 
+          
+          # Устанавливаем VNC пароль
+          echo "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt
+          
+          # Запускаем VNC
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -console
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate
+          
+          # Скачиваем bore (замените ссылку на актуальную версию для macOS)
+          curl -L "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-apple-darwin.tar.gz" -o bore.tar.gz
+          tar -xzf bore.tar.gz
+          chmod +x bore
+          
+          # Запускаем tunnel в фоне
+          ./bore local 5900 --to bore.pub > tunnel.log 2>&1 &
+          BORE_PID=$!
+          
+          # Даем время на запуск tunnel
+          sleep 10
+          
+          # Получаем tunnel URL из логов
+          TUNNEL_URL=$(grep "listening at" tunnel.log | grep -o "bore.pub:[0-9]*" | head -1)
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "Ошибка: Не удалось получить tunnel URL"
+            kill $BORE_PID
+            exit 1
+          fi
+          
+          echo "============== ДАННЫЕ ДЛЯ ПОДКЛЮЧЕНИЯ ==============="
+          echo "Адрес VNC:  $TUNNEL_URL"
+          echo "Юзер:       vncuser"
+          echo "Пароль (пользователь): $USER_PASSWORD"
+          echo "Пароль (VNC):         $VNC_PASSWORD"
+          echo ""
+          echo "Примечание:"
+          echo "- Используйте порт 5900 в клиенте VNC"
+          echo "- Имя пользователя: vncuser"
+          echo "- Пароль VNC может отличаться от пароля пользователя"
+          echo "====================================================="
+          
+          # Выводим в формате для GitHub Actions
+          echo "::notice title=VNC Access::Host: $TUNNEL_URL | User: vncuser | User Pass: $USER_PASSWORD | VNC Pass: $VNC_PASSWORD"
+          
+          # Ждем 6 часов (21600 секунд)
+          sleep 21600
+          
+          # Завершаем tunnel после ожидания
+          kill $BORE_PID
